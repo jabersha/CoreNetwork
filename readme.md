@@ -1,260 +1,171 @@
-# 🔐 NetworkKit – Camadas de Segurança  
-### Documento Técnico Oficial
+# CoreNetwork
 
-Este documento descreve todas as **camadas de segurança implementadas** no módulo **NetworkKit**, incluindo criptografia, anti‑replay, assinatura HMAC, middleware de device/app e anti‑tamper.
-
-É um guia independente e detalhado, com foco no que é crítico para a integridade, autenticidade e segurança das requisições enviadas pelo app.
+O **CoreNetwork** é o módulo responsável por toda a orquestração das requisições HTTP do aplicativo.  
+Ele constrói, assina, envia e interpreta requisições, integrando automaticamente todas as camadas de segurança fornecidas pelo módulo **CoreSecurity**.
 
 ---
 
-# 📌 Sumário
+# 📘 1. Objetivos
 
-1. Objetivos de Segurança  
-2. Arquitetura das Camadas de Segurança  
-3. Pipeline Seguro da Requisição  
-4. Camada 1 — Hash da Requisição (Integridade)  
-5. Camada 2 — Nonce + Timestamp + HMAC (Anti-Replay + Autenticidade)  
-6. Camada 3 — Security Middleware (Device, App, Anti-Tamper)  
-7. Implementações Internas  
-8. Headers de Segurança Implementados  
-9. Padrões e Boas Práticas Seguidas  
-10. Extensões Futuras  
+- Centralizar a comunicação HTTP.
+- Padronizar a criação e execução de requests.
+- Integrar com CoreSecurity (hash, nonce, timestamp, assinatura HMAC, device/app info, anti-tamper).
+- Garantir testabilidade via protocolos.
+- Desacoplar infraestrutura da camada de domínio.
 
 ---
 
-# 🎯 1. Objetivos de Segurança
+# 🧱 2. Arquitetura do Módulo
 
-As camadas de segurança do `NetworkKit` têm como metas principais:
+## 🔹 2.1 Endpoint
+Define uma rota da API:
 
-- Garantir **integridade** do corpo da requisição (hash SHA256)  
-- Prevenir **replay attacks**  
-- Garantir **autenticidade** com assinatura HMAC‑SHA256  
-- Identificar com segurança o dispositivo (Keychain)  
-- Inserir metadados confiáveis (OS, modelo, versão do app)  
-- Detectar **tampering do app** via hash do bundle  
-- Manter as Features desacopladas da lógica de segurança  
+- `path`
+- `method`
+- `headers`
+- `queryItems`
+- `body`
 
-Todo esse fluxo é transparente para camadas superiores.
+Cada feature implementa seus próprios endpoints.
 
 ---
 
-# 🧱 2. Arquitetura das Camadas de Segurança
+## 🔹 2.2 RequestBuilder
 
-As camadas são organizadas em três blocos independentes:
+Componente central do CoreNetwork.  
+Responsável por:
 
-```
-Security Layer 1 → Hash (integridade)
-Security Layer 2 → Nonce + Timestamp + HMAC (anti‑replay)
-Security Layer 3 → Middleware (device, app, anti‑tamper)
-```
+1. Construir o `URLRequest` base.
+2. Aplicar **todas** as camadas de segurança fornecidas pelo CoreSecurity:
+   - Hash do corpo
+   - Nonce
+   - Timestamp
+   - Assinatura HMAC
+   - Headers de device/app/anti-tamper
 
-Cada camada pode ser acionada por meio dessas funções (definidas no seu protocolo):
+A cada etapa, o request é enriquecido antes do envio.
+
+---
+
+## 🔹 2.3 APIClient / APIClientProtocol
+
+Fluxo básico:
 
 ```swift
-func buildRequest(baseURL: URL, endpoint: Endpoint) throws -> URLRequest
-func buildRequestHash(baseURL: URL, endpoint: Endpoint) throws -> URLRequest
-func buildResquestNonce(baseURL: URL, endpoint: Endpoint) throws -> URLRequest
-func buildResquestMiddleware(baseURL: URL, endpoint: Endpoint) throws -> URLRequest
+func request<T: Decodable>(_ endpoint: Endpoint) async throws -> T
+```
+
+Responsabilidades:
+
+- Solicitar ao `RequestBuilder` a construção do request.
+- Enviar via URLSession.
+- Validar status code.
+- Decodificar resposta.
+- Mapear erros em `NetworkError`.
+
+---
+
+## 🔹 2.4 NetworkError
+
+Enum de erros padronizados:
+
+- `.invalidURL`
+- `.transportError`
+- `.decodingError`
+- `.serverError(code)`
+- `.unauthorized`
+- `.unknown`
+
+---
+
+# 🔁 3. Pipeline Completo da Requisição
+
+```
+Feature → Endpoint
+        → RequestBuilder.buildRequest()
+        → applyHash()
+        → applyNonce()
+        → applyHMAC()
+        → applyMiddlewareDeviceAppIntegrity()
+        → applyKeyProvider()
+        → applyKeyRotation() 
+        → URLRequest final assinado
+        → APIClient.execute()
+        → validação
+        → decoding
+        → retorno
 ```
 
 ---
 
-# 🔐 3. Pipeline Seguro da Requisição
+# 🔐 4. Integração com CoreSecurity
 
-Fluxo completo da composição segura:
+O CoreNetwork **não implementa criptografia**.
 
-```
-Feature → Endpoint → SecureRequestBuilder
- → buildRequest()
- → buildRequestHash()
- → buildResquestMiddleware()
- → buildResquestNonce()
- → URLRequest Final Assinado
- → APIClient
-```
+Ele apenas chama:
 
----
+- `buildRequestHash()`
+- `buildRequestNonce()`
+- `buildRequestMiddleware()`
+- `buildResquestKeyProvider()`
+- `buildResquestKeyRotation()`    
 
-# 🔒 4. Camada 1 — Hash da Requisição (Integridade)
+# 🚀 5. Exemplo de Uso
 
-### Objetivo  
-Garantir que o corpo enviado ao servidor não sofreu adulteração.
-
-### Funcionamento
-
-1. Converte o `httpBody` para String  
-2. Calcula o hash SHA256  
-3. Adiciona o header:
-
-```
-X-Body-Hash: <sha256-hex>
-```
-
-### Utilitário utilizado
+### Endpoint
 
 ```swift
-CryptoUtils.sha256(text)
+struct GetUserEndpoint: Endpoint {
+    var path: String { "/user/me" }
+    var method: HTTPMethod { .get }
+}
 ```
 
-Essa camada garante que ataques de modificação de pacote não afetem o conteúdo.
+### Execução
+
+```swift
+let apiClient = APIClient(
+    session: URLSession.shared,
+    requestBuilder: SecureRequestBuilder(
+        baseURL: URL(string: "https://api.seubanco.com")!,
+        securityProvider: securityProvider
+    )
+)
+
+let user: User = try await apiClient.request(GetUserEndpoint())
+```
 
 ---
 
-# 🛡 5. Camada 2 — Nonce + Timestamp + Assinatura HMAC (Anti-Replay)
+# 🧪 6. Testabilidade
 
-Fundamental para impedir:
+Mock via protocolo:
 
-- replay de requisições  
-- reenvio de pacotes capturados  
-- ataques intermediários (MITM)  
-- clonation attacks  
+```swift
+final class APIClientMock: APIClientProtocol {
+    var result: Any?
+    var error: Error?
 
-### Funcionamento
-
-1. Gera *nonce* único por request  
-2. Gera **timestamp UNIX**  
-3. Calcula hash do corpo  
-4. Monta mensagem:
-
+    func request<T>(_ endpoint: Endpoint) async throws -> T where T : Decodable {
+        if let error { throw error }
+        return result as! T
+    }
+}
 ```
-<timestamp>
-<nonce>
-<bodyHash>
-```
-
-5. Assina com chave privada usando HMAC‑SHA256  
-6. Adiciona headers:
-
-```
-X-Nonce
-X-Timestamp
-X-Body-Hash
-X-Signature
-X-Time-Window
-```
-
-### Utilitários
-
-- `NonceGenerator.generate()`  
-- `CryptoUtils.hmacSHA256(message:key:)`  
 
 ---
 
-# 🧬 6. Camada 3 — Security Middleware  
-### (Device Info + App Info + Anti‑Tamper)
+# 📦 7. Instalação (Swift Package Manager)
 
-Essa camada adiciona metadados confiáveis para que o backend possa:
-
-- validar o dispositivo  
-- detectar ambiente manipulado  
-- identificar versão do app  
-- medir risco  
-
-### Headers adicionados
-
-#### 📱 Device
+```swift
+.package(url: "https://github.com/seu-org/CoreNetwork.git", branch: "main")
 ```
-X-Device-ID
-X-Device-Model
-X-System-Name
-X-System-Version
-```
-
-#### 📦 App
-```
-X-App-Version
-X-App-Build
-```
-
-#### 🛡 Anti‑Tamper
-```
-X-App-Integrity = SHA256(Info.plist)
-```
-
-### Utilitários internos
-
-- `DeviceInfo`  
-- `DeviceIDProvider` (Keychain)  
-- `BundleHasher`  
 
 ---
 
-# 🧩 7. Implementações Internas
+# ✅ 8. Resumo
 
-### ✔ CryptoUtils
-- SHA256  
-- HMAC‑SHA256  
-
-### ✔ AESCipher  
-- Criptografia simétrica AES‑GCM (para usos futuros)
-
-### ✔ NonceGenerator  
-- UUID v4 → evita colisões  
-
-### ✔ DeviceIDProvider  
-- DeviceID persistente, salvo no Keychain  
-
-### ✔ BundleHasher  
-- Hash SHA256 do bundle → detecção de manipulação  
-
-### ✔ SecurityMiddleware  
-- Insere headers de segurança automaticamente  
-
----
-
-# 📋 8. Headers Implementados
-
-| Categoria           | Header                 | Descrição |
-|--------------------|------------------------|-----------|
-| Integridade        | `X-Body-Hash`          | SHA256 do body |
-| Anti‑Replay        | `X-Nonce`              | Nonce único |
-| Anti‑Replay        | `X-Timestamp`          | Data UNIX |
-| Anti‑Replay        | `X-Signature`          | HMAC-SHA256 |
-| Anti‑Replay        | `X-Time-Window`        | Janela de validade |
-| Device             | `X-Device-ID`          | Persistente via Keychain |
-| Device             | `X-Device-Model`       | Modelo do iPhone |
-| Device             | `X-System-Name`        | iOS |
-| Device             | `X-System-Version`     | Ex.: 17.3 |
-| App                | `X-App-Version`        | Ex.: 1.3.2 |
-| App                | `X-App-Build`          | Ex.: 42 |
-| Anti‑Tamper        | `X-App-Integrity`      | Hash SHA256 do Info.plist |
-
----
-
-# 📚 9. Padrões e Boas Práticas Seguidas
-
-### ✔ OWASP MASVS  
-(Mobile Application Security Verification Standard)
-
-### ✔ OWASP MASTG  
-(Regras de segurança mobile)
-
-### ✔ Padrões de bancos e fintechs  
-- Nonce  
-- Timestamp  
-- Assinatura HMAC  
-- Device ID persistente  
-- Anti-tamper  
-
-### ✔ Zero Trust  
-Toda request é tratada como suspeita até validação completa.
-
----
-
-# 🚀 10. Extensões Futuras
-
-O módulo está preparado para:
-
-- TokenManager criptografado (AES + Keychain)  
-- Cert‑pinning avançado  
-- Assinatura dupla (client key + device key)  
-- Detecção de jailbreak / root  
-- Middlewares de risco (VPN/Proxy detection)  
-- Auditoria e telemetria  
-
----
-
-# ✔ Conclusão
-
-Este documento cobre exclusivamente as **camadas de segurança** implementadas no NetworkKit.  
-Ele serve como base técnica para auditoria, segurança, compliance e desenvolvedores iOS que integrarão as APIs protegidas pelo módulo.
+- Módulo oficial de comunicação HTTP.
+- Fornece API simples baseada em Endpoint.
+- Aplicação automática das camadas de segurança.
+- Separação clara entre segurança (CoreSecurity) e rede (CoreNetwork).
