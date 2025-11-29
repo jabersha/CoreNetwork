@@ -15,12 +15,12 @@ public protocol APIClientProtocol {
 public final class APIClient: APIClientProtocol {
 
     private let baseURL: URL
-    private let session: URLSession
+    private let session: URLSessionProtocol
     private let requestBuilder: RequestBuilding
 
     public init(
         baseURL: URL,
-        session: URLSession = .shared,
+        session: URLSessionProtocol = URLSession.shared,
         requestBuilder: RequestBuilding
     ) {
         self.baseURL = baseURL
@@ -44,11 +44,13 @@ public final class APIClient: APIClientProtocol {
                 throw APIError.serverError(statusCode: httpResponse.statusCode, data: data)
             }
 
-            do {
-                return try JSONDecoder().decode(T.self, from: data)
-            } catch {
-                throw APIError.decodingError(error)
-            }
+            return try JSONDecoder().decode(T.self, from: data)
+
+        } catch let apiError as APIError {
+            throw apiError
+
+        } catch let decodingError as DecodingError {
+            throw APIError.decodingError(decodingError)
 
         } catch {
             throw APIError.networkError(error)

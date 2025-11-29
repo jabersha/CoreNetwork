@@ -5,7 +5,9 @@ import PackageDescription
 
 let package = Package(
     name: "CoreNetwork",
-    platforms: [.iOS(.v15)],
+    platforms: [.iOS(.v15),
+                .macOS(.v12)
+],
     products: [
         .library(
             name: "CoreNetwork",
